@@ -1,4 +1,4 @@
-# DID++: AI-Powered Decentralized Identity Verification System
+# AI-Powered Decentralized Identity Verification System
 
 ## Overview
 DID++ is a multi-modal identity verification system combining:
@@ -44,48 +44,66 @@ Python 3.9+
      pip install -r requirements.txt
      ```
 
-## Running Tests
+## Running Tests & Generating Reports
 
-- To run all tests:
-  ```sh
-  pytest tests/
-  ```
-
-- To generate a detailed PDF report for the LFW face verification test, set the environment variable before running tests:
-  - **PowerShell:**
-    ```sh
-    $env:LFW_PDF_REPORT=1; pytest tests/
-    ```
-  - **Command Prompt:**
-    ```sh
-    set LFW_PDF_REPORT=1 && pytest tests/
-    ```
-
-- The PDF report will be saved as `lfw_face_verification_report.pdf` in the project directory.
-
-### Viewing the Detailed Report
-
-To see the detailed report output in your terminal, run:
+To run all tests:
 ```sh
-pytest tests/ -s
+pytest tests/
 ```
-The `-s` flag ensures that all print output (including the model's detailed report) is shown.
 
-### Generating a PDF Report
+To generate a PDF report for the LFW face verification test, set the environment variable `LFW_PDF_REPORT=1` before running tests. You can do this in two ways:
 
-To generate a PDF report for the LFW face verification test, set the environment variable `LFW_PDF_REPORT=1`.
-
-**Recommended:** Create a `.env` file in the project root and add:
+**Recommended:** Create a `.env` file in the project root with:
 ```
 LFW_PDF_REPORT=1
 ```
-You can also set the variable in your shell as shown below:
-  - **PowerShell:**
-    ```sh
-    $env:LFW_PDF_REPORT=1; pytest tests/
-    ```
-  - **Command Prompt:**
-    ```sh
-    set LFW_PDF_REPORT=1 && pytest tests/
-    ```
+The project uses `python-dotenv` to automatically load this variable.
+
+Or, set it in your shell:
+- **PowerShell:**
+  ```sh
+  $env:LFW_PDF_REPORT=1; pytest tests/
+  ```
+- **Command Prompt:**
+  ```sh
+  set LFW_PDF_REPORT=1 && pytest tests/
+  ```
+
 The PDF report will be saved as `lfw_face_verification_report.pdf` in the project directory.
+
+To see detailed output in the terminal, use:
+```sh
+pytest tests/ -s
+```
+The `-s` flag ensures all print output is shown.
+
+## Running the Application
+
+To start the Flask app, set the following environment variables and use the Flask CLI:
+
+**Required:**
+- `FLASK_APP=app.py`
+- `FLASK_ENV=development` (optional, enables debug mode)
+
+**On Windows (PowerShell):**
+```sh
+$env:FLASK_APP="app.py"
+flask run
+```
+
+**On Windows (Command Prompt):**
+```sh
+set FLASK_APP=app.py
+flask run
+```
+
+The app will be available at http://127.0.0.1:5000/
+
+
+## Environment Variables
+
+- `LFW_PDF_REPORT=1` — Enables PDF report generation for LFW face verification tests.
+- `FLASK_APP=app.py` — Required for `flask run`.
+- `FLASK_ENV=development` — (Optional) Enables debug mode for Flask.
+
+If using a `.env` file, all variables will be loaded automatically if `python-dotenv` is installed (already in requirements).

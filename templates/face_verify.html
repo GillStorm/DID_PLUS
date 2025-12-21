@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="max-w-5xl mx-auto grid md:grid-cols-2 gap-8">
+
+  <div class="glass p-6 rounded-2xl">
+    <video id="video" autoplay class="rounded-xl w-full mb-4"></video>
+
+    <button id="captureRef"
+      class="w-full py-3 bg-emerald-600 rounded-xl mb-3">
+      Capture Reference Face
+    </button>
+
+    <button id="captureVerify"
+      class="w-full py-3 bg-indigo-600 rounded-xl">
+      Capture Live & Verify
+    </button>
+  </div>
+
+  <div class="glass p-6 rounded-2xl">
+    <h2 class="text-xl font-semibold mb-4">Result</h2>
+    <div id="result" class="space-y-4"></div>
+  </div>
+
+</div>
+
+<script src="{{ url_for('static', filename='js/face.js') }}"></script>
+{% endblock %}
