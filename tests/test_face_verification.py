@@ -1,91 +1,238 @@
-
+import cv2
+import datetime
 import os
 import sys
-import json
-import cv2
+import tempfile
 import numpy as np
-import pytest
+import matplotlib.pyplot as plt
+
+from dotenv import load_dotenv
 from fpdf import FPDF
 from sklearn.datasets import fetch_lfw_pairs
 from collections import Counter
-import datetime
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from main import FaceModule, cosine_similarity
+from multimodal import FaceModule, cosine_similarity
 
-SAMPLE_DATA_DIR = os.path.join(os.path.dirname(__file__), 'sample_data')
-PAIRS_FILE = os.path.join(SAMPLE_DATA_DIR, 'pairs.json')
 
+# =========================
+# Helper Functions
+# =========================
+
+def save_pair_image(img1, img2, path):
+    fig, ax = plt.subplots(1, 2, figsize=(4, 2))
+    ax[0].imshow(cv2.cvtColor(img1, cv2.COLOR_BGR2RGB))
+    ax[1].imshow(cv2.cvtColor(img2, cv2.COLOR_BGR2RGB))
+    for a in ax:
+        a.axis("off")
+    plt.tight_layout()
+    plt.savefig(path, dpi=150)
+    plt.close()
+
+
+def save_score_histogram(results, path):
+    scores = [r["score"] for r in results]
+    plt.figure(figsize=(6, 4))
+    plt.hist(scores, bins=25)
+    plt.title("Similarity Score Distribution")
+    plt.xlabel("Score")
+    plt.ylabel("Count")
+    plt.tight_layout()
+    plt.savefig(path, dpi=150)
+    plt.close()
+
+
+def generate_styled_pdf_report(
+    detailed_results,
+    X,
+    total,
+    valid,
+    skipped,
+    correct,
+    accuracy,
+    threshold=0.7
+):
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    # =========================
+    # PAGE 1 — SUMMARY
+    # =========================
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 18)
+    pdf.cell(0, 12, "LFW Face Verification Report", ln=True)
+    pdf.ln(4)
+
+    pdf.set_font("Arial", size=11)
+    pdf.cell(0, 8, f"Generated: {datetime.datetime.now()}", ln=True)
+    pdf.ln(6)
+
+    pdf.set_font("Arial", "B", 13)
+    pdf.cell(0, 9, "Key Metrics", ln=True)
+    pdf.set_font("Arial", size=11)
+    pdf.cell(0, 8, f"Accuracy: {accuracy:.3f}", ln=True)
+    pdf.cell(0, 8, f"Total Pairs: {total}", ln=True)
+    pdf.cell(0, 8, f"Processed Pairs: {valid}", ln=True)
+    pdf.cell(0, 8, f"Skipped Pairs: {skipped}", ln=True)
+    pdf.ln(6)
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        save_score_histogram(detailed_results, tmp.name)
+        pdf.image(tmp.name, w=170)
+
+    pdf.ln(8)
+    pdf.set_font("Arial", "B", 13)
+    pdf.cell(0, 9, "Summary Table", ln=True)
+    pdf.set_font("Arial", size=11)
+    pdf.multi_cell(
+        0,
+        8,
+        f"""
+Threshold: {threshold}
+Accuracy: {accuracy:.3f}
+Correct Predictions: {correct}
+Skipped Rate: {skipped / total:.2%}
+        """.strip()
+    )
+
+    # =========================
+    # PAGE 2 — TOP 10 CORRECT
+    # =========================
+    top_correct = sorted(
+        [r for r in detailed_results if r["is_correct"]],
+        key=lambda r: abs(r["score"] - threshold),
+        reverse=True
+    )[:10]
+
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(0, 12, "Top 10 Most Confident Correct Predictions", ln=True)
+    pdf.ln(4)
+
+    for r in top_correct:
+        idx = r["pair_idx"]
+        img1, img2 = X[idx]
+
+        img1 = cv2.cvtColor((img1 * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+        img2 = cv2.cvtColor((img2 * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            save_pair_image(img1, img2, tmp.name)
+            pdf.image(tmp.name, w=110)
+
+        pdf.set_font("Arial", size=10)
+        pdf.multi_cell(
+            0,
+            6,
+            f"Score: {r['score']:.3f} | Expected: {r['expected']} | "
+            f"Predicted: {r['predicted']} | Correct"
+        )
+        pdf.ln(4)
+
+    # =========================
+    # PAGE 3 — TOP 10 ERRORS
+    # =========================
+    top_errors = sorted(
+        [r for r in detailed_results if not r["is_correct"]],
+        key=lambda r: abs(r["score"] - threshold),
+        reverse=True
+    )[:10]
+
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(0, 12, "Top 10 Most Confident Errors", ln=True)
+    pdf.ln(4)
+
+    for r in top_errors:
+        idx = r["pair_idx"]
+        img1, img2 = X[idx]
+
+        img1 = cv2.cvtColor((img1 * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+        img2 = cv2.cvtColor((img2 * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            save_pair_image(img1, img2, tmp.name)
+            pdf.image(tmp.name, w=110)
+
+        pdf.set_font("Arial", size=10)
+        pdf.multi_cell(
+            0,
+            6,
+            f"Score: {r['score']:.3f} | Expected: {r['expected']} | "
+            f"Predicted: {r['predicted']} | Wrong"
+        )
+        pdf.ln(4)
+
+    pdf.output("lfw_face_verification_report.pdf")
+    print("PDF report generated: lfw_face_verification_report.pdf")
+
+
+# =========================
+# Main Test
+# =========================
 
 def test_face_verification_lfw():
     """
-    Test face verification on a large number of pairs from the LFW dataset.
-    Set the environment variable LFW_PDF_REPORT=1 to generate a PDF report.
+    Face verification test on LFW dataset.
+    Set LFW_PDF_REPORT=1 to generate styled PDF report.
     """
-    lfw_pairs = fetch_lfw_pairs(subset='test', color=True, resize=0.5)
+    lfw_pairs = fetch_lfw_pairs(subset="test", color=True, resize=0.5)
     X, y = lfw_pairs.pairs, lfw_pairs.target
+
     face_mod = FaceModule()
-    correct = 0
+
     total = len(X)
+    correct = 0
     skipped = 0
     detailed_results = []
+
     for idx, (img1, img2) in enumerate(X):
         img1_bgr = cv2.cvtColor((img1 * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
         img2_bgr = cv2.cvtColor((img2 * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+
         try:
             emb1 = face_mod.embed_face(img1_bgr)
             emb2 = face_mod.embed_face(img2_bgr)
         except RuntimeError:
             skipped += 1
             continue
+
         score = (cosine_similarity(emb1, emb2) + 1.0) / 2.0
-        result = score >= 0.7
+        predicted = score >= 0.7
         expected = bool(y[idx])
-        is_correct = result == expected
+        is_correct = predicted == expected
+
         if is_correct:
             correct += 1
+
         detailed_results.append({
-            'pair_idx': idx,
-            'score': score,
-            'predicted': result,
-            'expected': expected,
-            'is_correct': is_correct
+            "pair_idx": idx,
+            "score": score,
+            "predicted": predicted,
+            "expected": expected,
+            "is_correct": is_correct
         })
+
     valid = total - skipped
-    accuracy = correct / valid if valid > 0 else 0
-    # Verbose report
-    report_lines = []
-    report_lines.append("\n================ LFW Face Verification Detailed Report ================")
-    report_lines.append(f"Test Date: {datetime.datetime.now()}")
-    report_lines.append(f"Total pairs: {total}")
-    report_lines.append(f"Pairs processed: {valid}")
-    report_lines.append(f"Pairs skipped: {skipped}")
-    report_lines.append(f"Correct predictions: {correct}")
-    report_lines.append(f"Accuracy: {accuracy:.3f}")
-    # Statistics
-    pred_counter = Counter([r['predicted'] for r in detailed_results])
-    exp_counter = Counter([r['expected'] for r in detailed_results])
-    report_lines.append(f"\nPrediction breakdown: {pred_counter}")
-    report_lines.append(f"Expected breakdown: {exp_counter}")
-    report_lines.append("====================================================================\n")
-    # Print the report to stdout (so pytest will show it even on pass)
-    print("\n".join(report_lines))
-    generate_pdf_report = os.environ.get("LFW_PDF_REPORT", "0") == "1"
-    if generate_pdf_report:
-        try:
-            pdf = FPDF()
-            pdf.add_page()
-            pdf.set_font("Arial", size=12)
-            pdf.cell(200, 10, txt="LFW Face Verification Test Report", ln=True, align='C')
-            pdf.cell(200, 10, txt=f"Test Date: {datetime.datetime.now()}", ln=True)
-            pdf.cell(200, 10, txt=f"Total pairs: {total}", ln=True)
-            pdf.cell(200, 10, txt=f"Pairs processed: {valid}", ln=True)
-            pdf.cell(200, 10, txt=f"Pairs skipped: {skipped}", ln=True)
-            pdf.cell(200, 10, txt=f"Correct predictions: {correct}", ln=True)
-            pdf.cell(200, 10, txt=f"Accuracy: {accuracy:.3f}", ln=True)
-            pdf.cell(200, 10, txt=f"Prediction breakdown: {dict(pred_counter)}", ln=True)
-            pdf.cell(200, 10, txt=f"Expected breakdown: {dict(exp_counter)}", ln=True)
-            pdf.output("lfw_face_verification_report.pdf")
-            print("PDF report generated: lfw_face_verification_report.pdf")
-        except ImportError:
-            print("[ERROR] fpdf not installed. Run 'pip install fpdf' to enable PDF report generation.")
-    assert accuracy > 0.5, f"Accuracy too low: {accuracy:.3f} (Skipped {skipped} of {total})"
+    accuracy = correct / valid if valid > 0 else 0.0
+
+    print("\n========== LFW FACE VERIFICATION REPORT ==========")
+    print(f"Total pairs: {total}")
+    print(f"Processed pairs: {valid}")
+    print(f"Skipped pairs: {skipped}")
+    print(f"Correct predictions: {correct}")
+    print(f"Accuracy: {accuracy:.3f}")
+
+    load_dotenv()
+    if os.environ.get("LFW_PDF_REPORT", "1") == "1":
+        generate_styled_pdf_report(
+            detailed_results,
+            X,
+            total,
+            valid,
+            skipped,
+            correct,
+            accuracy
+        )
+
+    assert accuracy > 0.5, f"Accuracy too low: {accuracy:.3f}"

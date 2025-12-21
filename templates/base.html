@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>DID++ Face Verification</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body class="bg-gradient-to-br from-zinc-900 to-black text-white min-h-screen">
+
+<nav class="p-6 text-xl font-bold">
+  DID++ <span class="text-indigo-400">Biometrics</span>
+</nav>
+
+<main class="p-6">
+  {% block content %}{% endblock %}
+</main>
+
+</body>
+</html>
