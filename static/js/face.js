@@ -1,17 +1,38 @@
+// -------------------- elements --------------------
+
 const video = document.getElementById("video");
 const resultBox = document.getElementById("result");
 
+const refPreview = document.getElementById("refPreview");
+const livePreview = document.getElementById("livePreview");
+
+const uploadRef = document.getElementById("uploadRef");
+const uploadLive = document.getElementById("uploadLive");
+
+const btnCaptureRef = document.getElementById("captureRef");
+const btnCaptureVerify = document.getElementById("captureVerify");
+
+// -------------------- camera --------------------
+
 navigator.mediaDevices.getUserMedia({ video: true })
-  .then(stream => video.srcObject = stream);
+  .then(stream => video.srcObject = stream)
+  .catch(() => {
+    resultBox.innerHTML = "⚠️ Camera unavailable — uploads still work";
+  });
+
+// -------------------- state --------------------
 
 let referenceBlob = null;
+let liveBlob = null;
 
-// ---------- helpers ----------
+// -------------------- helpers --------------------
 
 function stats(arr) {
-  const mean = arr.reduce((a,b)=>a+b,0)/arr.length;
-  const std = Math.sqrt(arr.reduce((a,b)=>a+(b-mean)**2,0)/arr.length);
-  const norm = Math.sqrt(arr.reduce((a,b)=>a+b*b,0));
+  const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+  const std = Math.sqrt(
+    arr.reduce((a, b) => a + (b - mean) ** 2, 0) / arr.length
+  );
+  const norm = Math.sqrt(arr.reduce((a, b) => a + b * b, 0));
   return { mean, std, norm };
 }
 
@@ -23,22 +44,45 @@ async function captureFrame() {
   return new Promise(r => c.toBlob(r, "image/jpeg"));
 }
 
-// ---------- buttons ----------
+function showPreview(imgEl, blob) {
+  imgEl.src = URL.createObjectURL(blob);
+  imgEl.classList.remove("hidden");
+}
 
-document.getElementById("captureRef").onclick = async () => {
+// -------------------- uploads --------------------
+
+uploadRef.onchange = e => {
+  referenceBlob = e.target.files[0];
+  showPreview(refPreview, referenceBlob);
+  resultBox.innerHTML = "📂 Reference image uploaded";
+};
+
+uploadLive.onchange = e => {
+  liveBlob = e.target.files[0];
+  showPreview(livePreview, liveBlob);
+};
+
+// -------------------- buttons --------------------
+
+btnCaptureRef.onclick = async () => {
   referenceBlob = await captureFrame();
+  showPreview(refPreview, referenceBlob);
   resultBox.innerHTML = "✅ Reference image captured";
 };
 
-document.getElementById("captureVerify").onclick = async () => {
+btnCaptureVerify.onclick = async () => {
   if (!referenceBlob) {
-    resultBox.innerHTML = "❌ Capture reference first";
+    resultBox.innerHTML = "❌ Add a reference image first";
     return;
   }
 
   resultBox.innerHTML = "🔍 Verifying…";
 
-  const liveBlob = await captureFrame();
+  if (!liveBlob) {
+    liveBlob = await captureFrame();
+    showPreview(livePreview, liveBlob);
+  }
+
   const form = new FormData();
   form.append("reference", referenceBlob, "ref.jpg");
   form.append("live", liveBlob, "live.jpg");
@@ -72,7 +116,8 @@ document.getElementById("captureVerify").onclick = async () => {
   <div class="grid md:grid-cols-2 gap-4 mt-4">
     <div>
       <p>Ref norm: ${rs.norm.toFixed(3)}</p>
-      <details><summary>Raw</summary>
+      <details>
+        <summary>Raw</summary>
         <pre class="text-xs max-h-48 overflow-auto">
 ${JSON.stringify(r, null, 2)}
         </pre>
@@ -81,7 +126,8 @@ ${JSON.stringify(r, null, 2)}
 
     <div>
       <p>Live norm: ${ls.norm.toFixed(3)}</p>
-      <details><summary>Raw</summary>
+      <details>
+        <summary>Raw</summary>
         <pre class="text-xs max-h-48 overflow-auto">
 ${JSON.stringify(l, null, 2)}
         </pre>
@@ -99,4 +145,7 @@ ${JSON.stringify(data, null, 2)}
   </pre>
 </details>
 `;
+
+  // reset live image so next verify can re-capture if wanted
+  liveBlob = null;
 };
