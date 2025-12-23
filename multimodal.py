@@ -1,14 +1,14 @@
 # did_plus_mediapipe.py
+import os
+# import mediapipe as mp
 import cv2
 import numpy as np
 import librosa
 import easyocr
 import json
 from datetime import datetime
+from deepface import DeepFace
 from typing import Dict, Any, Optional
-import mediapipe as mp
-import os
-
 # ================== UTILS ==================
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -21,66 +21,50 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 class FaceModule:
     """
-    Face embedding using MediaPipe FaceMesh.
-    We extract 468 3D landmarks, flatten them, normalize, then apply
-    a deterministic random projection to produce a 256-D embedding.
+    Face embedding using DeepFace.
+    Produces a deterministic face embedding suitable for verification.
     """
-    def __init__(self, embedding_dim: int = 256, seed: int = 42):
-        self.embedding_dim = embedding_dim
-        self.mp_face = mp.solutions.face_mesh.FaceMesh(
-            static_image_mode=True,
-            max_num_faces=1,
-            refine_landmarks=False,
-            min_detection_confidence=0.5
-        )
-        # Deterministic random projection matrix
-        rng = np.random.default_rng(seed)
-        # projection: (468*3) -> embedding_dim
-        self.landmark_size = 468 * 3
-        self.proj = rng.standard_normal((self.landmark_size, embedding_dim)).astype("float32")
-        # normalize columns for stable embeddings
-        self.proj = self.proj / (np.linalg.norm(self.proj, axis=0, keepdims=True) + 1e-12)
-        print(f"[Face] MediaPipe FaceMesh ready (embedding_dim={embedding_dim})")
-
-    def _get_landmarks(self, image_bgr: np.ndarray) -> Optional[np.ndarray]:
-        rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        results = self.mp_face.process(rgb)
-        if not results.multi_face_landmarks:
-            return None
-        lm = results.multi_face_landmarks[0].landmark
-        pts = np.array([[p.x, p.y, p.z] for p in lm], dtype="float32")  # shape (468,3)
-        return pts  # (468,3)
+    def __init__(
+        self,
+        model_name: str = "ArcFace",
+        detector_backend: str = "retinaface"
+    ):
+        self.model_name = model_name
+        self.detector_backend = detector_backend
+        print(f"[Face] DeepFace ready (model={model_name}, detector={detector_backend})")
 
     def detect_largest_face(self, img_bgr: np.ndarray) -> np.ndarray:
         """
-        We return the original image. The embedding uses landmarks on whole image.
-        For systems that need cropping, you can implement cropping using bbox from landmarks.
+        DeepFace handles detection internally.
+        This function exists to preserve structure.
         """
         return img_bgr
 
     def embed_face(self, img_bgr: np.ndarray) -> np.ndarray:
         """
-        Returns embedding (embedding_dim,) as float32
+        Returns embedding (D,) as float32
         """
-        pts = self._get_landmarks(img_bgr)
-        if pts is None:
-            raise RuntimeError("No face landmarks detected")
-        flat = pts.flatten()  # length 468*3
-        # normalize by centroid + scale
-        flat_mean = flat.mean()
-        flat = flat - flat_mean
-        norm = np.linalg.norm(flat) + 1e-12
-        flat = flat / norm
-        # Pad/truncate to expected size (defensive)
-        if flat.shape[0] < self.landmark_size:
-            flat = np.pad(flat, (0, self.landmark_size - flat.shape[0]), mode="constant")
-        elif flat.shape[0] > self.landmark_size:
-            flat = flat[:self.landmark_size]
-        # deterministic projection
-        emb = np.dot(flat.astype("float32"), self.proj)  # (embedding_dim,)
-        # final normalize
+        try:
+            reps = DeepFace.represent(
+                img_path=img_bgr,
+                model_name=self.model_name,
+                detector_backend=self.detector_backend,
+                enforce_detection=True,
+                align=True,
+                normalization="base"
+            )
+        except Exception as e:
+            raise RuntimeError(f"DeepFace failed to extract face: {e}")
+
+        if not reps or "embedding" not in reps[0]:
+            raise RuntimeError("No face embedding returned")
+
+        emb = np.array(reps[0]["embedding"], dtype="float32")
+
+        # normalize (important for cosine similarity)
         emb = emb / (np.linalg.norm(emb) + 1e-12)
-        return emb.astype("float32")
+        return emb
+
 
 # ================== VOICE MODULE ==================
 
