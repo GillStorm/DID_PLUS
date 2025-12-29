@@ -5,11 +5,12 @@ import librosa
 import easyocr
 import json
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Tuple
 import mediapipe as mp
 import os
 import sys
 import traceback
+import re
 
 # Try to import soundfile, fallback to librosa
 try:
@@ -101,11 +102,9 @@ class VoiceModule:
 
     def embed_voice(self, audio_path: str) -> np.ndarray:
         try:
-            # Check file exists
             if not os.path.exists(audio_path):
                 abs_path = os.path.abspath(audio_path)
                 print(f"[ERROR] Audio file not found: {abs_path}", flush=True)
-                print(f"[HINT] Current directory: {os.getcwd()}", flush=True)
                 raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
             file_size = os.path.getsize(audio_path)
@@ -114,39 +113,31 @@ class VoiceModule:
             
             print(f"[Voice] Loading: {audio_path} ({file_size} bytes)", flush=True)
 
-            # Load audio with appropriate backend
             if USE_SOUNDFILE:
-                # Use soundfile directly
                 y, sr = sf.read(audio_path, always_2d=False)
-                print(f"[Voice] soundfile load: shape={y.shape}, sr={sr}, dtype={y.dtype}", flush=True)
+                print(f"[Voice] soundfile load: shape={y.shape}, sr={sr}", flush=True)
 
-                # Handle stereo
                 if y.ndim > 1:
                     y = np.mean(y, axis=1)
                     print(f"[Voice] Converted stereo to mono", flush=True)
 
-                # Convert to float32
                 if y.dtype != np.float32:
                     y = y.astype(np.float32)
 
-                # Resample if needed
                 if sr != self.sample_rate:
                     print(f"[Voice] Resampling {sr}Hz → {self.sample_rate}Hz", flush=True)
                     y = librosa.resample(y, orig_sr=sr, target_sr=self.sample_rate)
                     sr = self.sample_rate
             else:
-                # Use librosa
                 y, sr = librosa.load(audio_path, sr=self.sample_rate, mono=True)
                 print(f"[Voice] librosa load: {len(y)} samples, {len(y)/sr:.2f}s", flush=True)
 
-            # Validate audio
             if y.size == 0:
                 raise RuntimeError("Audio has no samples after loading")
             
             if len(y) < 1000:
                 print(f"[WARN] Audio is very short: {len(y)} samples ({len(y)/sr:.3f}s)", flush=True)
 
-            # Extract MFCC features
             try:
                 mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=40)
                 print(f"[Voice] MFCC shape: {mfcc.shape}", flush=True)
@@ -154,7 +145,6 @@ class VoiceModule:
                 print(f"[ERROR] MFCC extraction failed: {mfcc_error}", flush=True)
                 raise RuntimeError(f"Failed to extract MFCC: {mfcc_error}")
 
-            # Create embedding
             emb = np.concatenate([mfcc.mean(axis=1), mfcc.std(axis=1)])
             emb /= (np.linalg.norm(emb) + 1e-12)
 
@@ -168,11 +158,13 @@ class VoiceModule:
             traceback.print_exc()
             raise
 
-# ================== DOCUMENT MODULE ==================
+# ================== DOCUMENT MODULE (ENHANCED) ==================
 
 class DocumentModule:
     def __init__(self, face_module: FaceModule, ocr_langs=["en"]):
-        print("[Doc] Initializing EasyOCR (safe mode)", flush=True)
+        print("[Doc] Initializing document verification module...", flush=True)
+        
+        # Initialize OCR
         try:
             self.reader = easyocr.Reader(ocr_langs, gpu=False, verbose=False)
             self.ocr_enabled = True
@@ -182,26 +174,86 @@ class DocumentModule:
             print(f"[WARN] OCR will be disabled", flush=True)
             self.reader = None
             self.ocr_enabled = False
+        
         self.face_module = face_module
+        
+        # Common ID document patterns
+        self.patterns = {
+            'name': [
+                r'Name[:\s]+([A-Z][a-z]+(?:\s[A-Z][a-z]+)+)',
+                r'Full Name[:\s]+([A-Z][a-z]+(?:\s[A-Z][a-z]+)+)',
+                r'([A-Z][a-z]+\s[A-Z][a-z]+(?:\s[A-Z][a-z]+)?)',
+            ],
+            'id_number': [
+                r'ID[:\s#]+([A-Z0-9\-]+)',
+                r'Number[:\s#]+([A-Z0-9\-]+)',
+                r'Card No[:\s#]+([A-Z0-9\-]+)',
+                r'\b([A-Z]{2}[0-9]{6,})\b',
+            ],
+            'dob': [
+                r'DOB[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+                r'Date of Birth[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+                r'Born[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+            ],
+            'expiry': [
+                r'Exp[a-z]*[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+                r'Valid Until[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+            ],
+            'address': [
+                r'Address[:\s]+([A-Za-z0-9\s,.-]+(?:\d{5,6})?)',
+            ]
+        }
 
     def ocr_document(self, image_path: str) -> Dict[str, Any]:
+        """Extract text from document using OCR"""
         if not self.ocr_enabled:
-            return {"text": ""}
+            return {"text": "", "structured_data": {}}
 
         try:
             if not os.path.exists(image_path):
                 print(f"[WARN] Document not found: {image_path}", flush=True)
-                return {"text": ""}
+                return {"text": "", "structured_data": {}}
             
+            print(f"[Doc] Running OCR on: {image_path}", flush=True)
             result = self.reader.readtext(image_path, detail=1)
-            text = " ".join([r[1] for r in result])
-            print(f"[Doc] OCR extracted {len(text)} characters", flush=True)
-            return {"text": text}
+            
+            # Extract all text
+            full_text = " ".join([r[1] for r in result])
+            print(f"[Doc] OCR extracted {len(full_text)} characters", flush=True)
+            
+            # Extract structured data
+            structured_data = self.extract_structured_data(full_text)
+            
+            # Get text positions for quality check
+            text_boxes = [(r[0], r[1], r[2]) for r in result]  # bbox, text, confidence
+            avg_confidence = np.mean([r[2] for r in result]) if result else 0.0
+            
+            return {
+                "text": full_text,
+                "structured_data": structured_data,
+                "text_boxes": text_boxes,
+                "avg_confidence": float(avg_confidence),
+                "num_fields": len(result)
+            }
         except Exception as e:
             print(f"[WARN] OCR failed: {e}", flush=True)
-            return {"text": ""}
+            return {"text": "", "structured_data": {}}
+
+    def extract_structured_data(self, text: str) -> Dict[str, str]:
+        """Extract structured information from OCR text"""
+        data = {}
+        
+        for field, patterns in self.patterns.items():
+            for pattern in patterns:
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    data[field] = match.group(1).strip()
+                    break
+        
+        return data
 
     def extract_id_face_embedding(self, image_bgr: np.ndarray) -> Optional[np.ndarray]:
+        """Extract face from ID document photo"""
         try:
             print("[Doc] Extracting face from ID document...", flush=True)
             emb = self.face_module.embed_face(image_bgr)
@@ -210,6 +262,155 @@ class DocumentModule:
         except Exception as e:
             print(f"[WARN] Could not extract face from ID: {e}", flush=True)
             return None
+
+    def check_document_quality(self, image_bgr: np.ndarray) -> Dict[str, Any]:
+        """Check document image quality"""
+        try:
+            # Convert to grayscale
+            gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+            
+            # Check sharpness (Laplacian variance)
+            laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+            sharpness = laplacian.var()
+            
+            # Check brightness
+            brightness = np.mean(gray)
+            
+            # Check contrast
+            contrast = gray.std()
+            
+            # Detect edges (for document boundaries)
+            edges = cv2.Canny(gray, 50, 150)
+            edge_density = np.sum(edges > 0) / edges.size
+            
+            quality_score = 0.0
+            issues = []
+            
+            # Sharpness check
+            if sharpness < 100:
+                issues.append("Image is blurry")
+            else:
+                quality_score += 0.3
+            
+            # Brightness check
+            if brightness < 50:
+                issues.append("Image is too dark")
+            elif brightness > 200:
+                issues.append("Image is too bright")
+            else:
+                quality_score += 0.3
+            
+            # Contrast check
+            if contrast < 30:
+                issues.append("Low contrast")
+            else:
+                quality_score += 0.2
+            
+            # Edge density check
+            if edge_density > 0.1:
+                quality_score += 0.2
+            
+            return {
+                'quality_score': float(quality_score),
+                'sharpness': float(sharpness),
+                'brightness': float(brightness),
+                'contrast': float(contrast),
+                'edge_density': float(edge_density),
+                'is_acceptable': quality_score >= 0.6,
+                'issues': issues
+            }
+            
+        except Exception as e:
+            print(f"[WARN] Quality check failed: {e}", flush=True)
+            return {'quality_score': 0.0, 'is_acceptable': False, 'issues': ['Quality check failed']}
+
+    def verify_document(self, enrolled_doc_data: Dict, enrolled_live_face: np.ndarray,
+                       current_image_path: str, current_image_bgr: np.ndarray,
+                       current_live_face: np.ndarray) -> Dict[str, Any]:
+        """
+        Verify document by comparing:
+        1. Face on ID document with live face photo
+        2. Extracted text consistency
+        """
+        results = {
+            'id_to_live_match': False,
+            'id_to_live_score': 0.0,
+            'text_match': False,
+            'text_similarity': 0.0,
+            'document_score': 0.0,
+            'verified': False
+        }
+        
+        try:
+            print(f"[Doc] Verifying document...", flush=True)
+            
+            # 1. Extract face from current ID document
+            print(f"[Doc] Extracting face from ID document...", flush=True)
+            current_id_face = self.extract_id_face_embedding(current_image_bgr)
+            
+            # 2. Compare ID face with live photo face
+            if current_id_face is not None:
+                print(f"[Doc] Comparing ID photo with live face photo...", flush=True)
+                
+                # Compare current ID face with current live face
+                face_similarity = cosine_similarity(current_id_face, current_live_face)
+                id_to_live_score = (face_similarity + 1) / 2
+                
+                results['id_to_live_score'] = float(id_to_live_score)
+                results['id_to_live_match'] = id_to_live_score >= 0.75  # 75% threshold
+                
+                print(f"[Doc] ID-to-Live face match: {id_to_live_score:.2%}", flush=True)
+            else:
+                print(f"[WARN] Could not extract face from ID document", flush=True)
+            
+            # 3. Extract and compare text (optional, for additional verification)
+            print(f"[Doc] Comparing document text...", flush=True)
+            current_ocr = self.ocr_document(current_image_path)
+            enrolled_text = enrolled_doc_data.get('document_text', '')
+            current_text = current_ocr.get('text', '')
+            
+            if enrolled_text and current_text:
+                # Simple text similarity (Jaccard similarity)
+                enrolled_words = set(enrolled_text.lower().split())
+                current_words = set(current_text.lower().split())
+                
+                if enrolled_words and current_words:
+                    intersection = enrolled_words & current_words
+                    union = enrolled_words | current_words
+                    text_similarity = len(intersection) / len(union)
+                    
+                    results['text_similarity'] = float(text_similarity)
+                    results['text_match'] = text_similarity >= 0.70  # 70% threshold
+                    
+                    print(f"[Doc] Text similarity: {text_similarity:.2%}", flush=True)
+                    
+                    # Compare structured data if available
+                    if current_ocr.get('structured_data'):
+                        results['structured_data'] = current_ocr['structured_data']
+            
+            # 4. Calculate document score (weighted average)
+            # 70% ID-to-Live face match + 30% text similarity
+            document_score = (
+                0.70 * results['id_to_live_score'] +
+                0.30 * results.get('text_similarity', 0.0)
+            )
+            results['document_score'] = float(document_score)
+            
+            # Document is verified if:
+            # - ID face matches live face (>= 75%) OR
+            # - Text matches (>= 70%)
+            results['verified'] = (
+                results['id_to_live_match'] or results['text_match']
+            )
+            
+            print(f"[Doc] Document score: {document_score:.2%}", flush=True)
+            print(f"[Doc] Document verification: {'PASS' if results['verified'] else 'FAIL'}", flush=True)
+            
+        except Exception as e:
+            print(f"[ERROR] Document verification failed: {e}", flush=True)
+            traceback.print_exc()
+        
+        return results
 
 # ================== IDENTITY SYSTEM ==================
 
@@ -230,20 +431,17 @@ class IdentitySystem:
         print(f"ENROLLMENT: {user_id}")
         print(f"{'='*60}")
 
-        # Convert to absolute paths
         face_path = os.path.abspath(face_path)
         voice_path = os.path.abspath(voice_path)
         doc_path = os.path.abspath(doc_path)
         template_file = os.path.abspath(template_file)
 
-        # Validate files
         print("\n[1/4] Validating input files...")
         for path, name in [(face_path, "Face"), (voice_path, "Voice"), (doc_path, "Document")]:
             if not os.path.exists(path):
                 raise FileNotFoundError(f"{name} file not found: {path}")
             print(f"  ✓ {name}: {os.path.basename(path)}")
 
-        # Process face
         print("\n[2/4] Processing face image...")
         img_face = cv2.imread(face_path)
         if img_face is None:
@@ -252,40 +450,47 @@ class IdentitySystem:
         face_emb = self.face_mod.embed_face(img_face)
         print(f"  ✓ Face embedding: {face_emb.shape}")
 
-        # Process voice
         print("\n[3/4] Processing voice audio...")
         voice_emb = self.voice_mod.embed_voice(voice_path)
         print(f"  ✓ Voice embedding: {voice_emb.shape}")
 
-        # Process document
         print("\n[4/4] Processing ID document...")
         img_doc = cv2.imread(doc_path)
         if img_doc is None:
             print(f"  [WARN] Could not read document image")
-            doc_ocr = {"text": ""}
+            doc_ocr = {"text": "", "structured_data": {}}
             id_face_emb = None
         else:
+            # Extract text and structured data
             doc_ocr = self.doc_mod.ocr_document(doc_path)
+            print(f"  OCR confidence: {doc_ocr.get('avg_confidence', 0):.2%}")
+            
+            # Show extracted structured data
+            if doc_ocr.get('structured_data'):
+                print(f"  Structured data extracted:")
+                for key, value in doc_ocr['structured_data'].items():
+                    print(f"    • {key}: {value}")
+            
+            # Extract face from ID
             id_face_emb = self.doc_mod.extract_id_face_embedding(img_doc)
 
-        # Create template
         template = {
             "user_id": user_id,
             "enrolled_at": datetime.now().isoformat(),
             "face_embedding": face_emb.tolist(),
             "voice_embedding": voice_emb.tolist(),
             "id_face_embedding": None if id_face_emb is None else id_face_emb.tolist(),
-            "document_text": doc_ocr["text"]
+            "document_text": doc_ocr.get("text", ""),
+            "document_structured": doc_ocr.get("structured_data", {})
         }
 
-        # Save
         with open(template_file, "w", encoding="utf-8") as f:
             json.dump(template, f, indent=2)
 
         print(f"\n{'='*60}")
         print(f"✓ ENROLLMENT SUCCESSFUL")
         print(f"  Template: {os.path.basename(template_file)}")
-        print(f"  Size: {os.path.getsize(template_file)} bytes")
+        print(f"  Size: {os.path.getsize(template_file):,} bytes")
         print(f"{'='*60}\n")
 
     def verify_user(self, template_file, face_path, voice_path, doc_path):
@@ -293,8 +498,7 @@ class IdentitySystem:
         print("VERIFICATION IN PROGRESS")
         print(f"{'='*60}")
 
-        # Load template
-        print("\n[1/3] Loading template...")
+        print("\n[1/4] Loading template...")
         if not os.path.exists(template_file):
             raise FileNotFoundError(f"Template not found: {template_file}")
         
@@ -305,8 +509,7 @@ class IdentitySystem:
         face_ref = np.array(tpl["face_embedding"])
         voice_ref = np.array(tpl["voice_embedding"])
 
-        # Verify face
-        print("\n[2/3] Verifying face...")
+        print("\n[2/4] Verifying face...")
         img_face = cv2.imread(face_path)
         if img_face is None:
             raise RuntimeError(f"Could not read face image: {face_path}")
@@ -314,31 +517,73 @@ class IdentitySystem:
         face_score = (cosine_similarity(face_ref, face_emb) + 1) / 2
         print(f"  Face score: {face_score:.2%}")
 
-        # Verify voice
-        print("\n[3/3] Verifying voice...")
+        print("\n[3/4] Verifying voice...")
         voice_emb = self.voice_mod.embed_voice(voice_path)
         voice_score = (cosine_similarity(voice_ref, voice_emb) + 1) / 2
         print(f"  Voice score: {voice_score:.2%}")
 
-        # Final decision
-        final_score = 0.6 * face_score + 0.4 * voice_score
-        verified = final_score >= 0.75
+        print("\n[4/4] Verifying document...")
+        img_doc = cv2.imread(doc_path)
+        if img_doc is None:
+            print(f"  [WARN] Could not read document image")
+            doc_results = {
+                'verified': False,
+                'document_score': 0.0,
+                'id_to_live_score': 0.0,
+                'text_similarity': 0.0
+            }
+        else:
+            doc_results = self.doc_mod.verify_document(tpl, face_emb, doc_path, img_doc, face_emb)
+        
+        print(f"  Document score: {doc_results['document_score']:.2%}")
+        print(f"  ID-to-Live face match: {doc_results['id_to_live_score']:.2%}")
+        if doc_results.get('text_similarity', 0) > 0:
+            print(f"  Text similarity: {doc_results['text_similarity']:.2%}")
+
+        # Multi-modal scoring: 45% Face + 35% Voice + 20% Document
+        final_score = (
+            0.45 * face_score +
+            0.35 * voice_score +
+            0.20 * doc_results['document_score']
+        )
+        
+        verified = (
+            face_score >= 0.75 and
+            voice_score >= 0.70 and
+            doc_results['document_score'] >= 0.70 and
+            final_score >= 0.75
+        )
 
         print(f"\n{'='*60}")
         if verified:
             print(f"✓ VERIFICATION SUCCESSFUL")
         else:
             print(f"✗ VERIFICATION FAILED")
-        print(f"  Final score: {final_score:.2%} (threshold: 75%)")
+        print(f"  Final score: {final_score:.2%}")
+        print(f"  Weights: Face 45% + Voice 35% + Document 20%")
+        print(f"  Thresholds: Face≥75%, Voice≥70%, Document≥70%, Overall≥75%")
         print(f"{'='*60}\n")
 
         return {
             "user_id": tpl["user_id"],
             "face_score": float(face_score),
             "voice_score": float(voice_score),
+            "document_score": doc_results['document_score'],
+            "id_to_live_face_score": doc_results['id_to_live_score'],
+            "document_text_similarity": doc_results.get('text_similarity', 0.0),
             "final_score": float(final_score),
             "verified": verified,
-            "threshold": 0.75
+            "weights": {
+                "face": 0.45,
+                "voice": 0.35,
+                "document": 0.20
+            },
+            "checks_passed": {
+                "face": face_score >= 0.75,
+                "voice": voice_score >= 0.70,
+                "document": doc_results['document_score'] >= 0.70,
+                "overall": final_score >= 0.75
+            }
         }
 
 # ================== CLI ==================
@@ -346,17 +591,17 @@ class IdentitySystem:
 def main():
     import argparse
     parser = argparse.ArgumentParser(
-        description="DID++ Identity Verification System",
+        description="DID++ Identity Verification System with Document Verification",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   # Enroll
   python multimodal.py --mode enroll --user_id john \\
-    --face face.jpg --voice voice.wav --doc id.jpg
+    --face face.jpg --voice voice.wav --doc id_card.jpg
 
   # Verify
   python multimodal.py --mode verify \\
-    --face verify_face.jpg --voice verify_voice.wav --doc id.jpg \\
+    --face verify_face.jpg --voice verify_voice.wav --doc verify_id.jpg \\
     --template template_user_1.json
         """
     )
