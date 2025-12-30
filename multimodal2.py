@@ -92,13 +92,71 @@ class FaceModule:
         emb /= (np.linalg.norm(emb) + 1e-12)
         return emb.astype("float32")
 
-# ================== VOICE MODULE ==================
+# ================== VOICE MODULE (ENHANCED) ==================
 
 class VoiceModule:
     def __init__(self, sample_rate: int = 16000):
         self.sample_rate = sample_rate
         backend = "soundfile" if USE_SOUNDFILE else "librosa"
-        print(f"[Voice] MFCC ready (backend: {backend})", flush=True)
+        print(f"[Voice] Enhanced speaker verification ready (backend: {backend})", flush=True)
+
+    def extract_speaker_features(self, y: np.ndarray, sr: int) -> Dict[str, np.ndarray]:
+        """
+        Extract comprehensive speaker-specific features
+        Returns multiple feature types for robust speaker verification
+        """
+        features = {}
+        
+        # 1. MFCC (Mel-Frequency Cepstral Coefficients)
+        mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=40)
+        features['mfcc_mean'] = mfcc.mean(axis=1)
+        features['mfcc_std'] = mfcc.std(axis=1)
+        features['mfcc_delta'] = librosa.feature.delta(mfcc).mean(axis=1)
+        
+        # 2. Pitch/F0 (Fundamental frequency - voice uniqueness)
+        pitches, magnitudes = librosa.piptrack(y=y, sr=sr, fmin=75, fmax=400)
+        pitch_values = []
+        for t in range(pitches.shape[1]):
+            index = magnitudes[:, t].argmax()
+            pitch = pitches[index, t]
+            if pitch > 0:
+                pitch_values.append(pitch)
+        
+        if pitch_values:
+            features['pitch_mean'] = np.array([np.mean(pitch_values)])
+            features['pitch_std'] = np.array([np.std(pitch_values)])
+            features['pitch_range'] = np.array([np.max(pitch_values) - np.min(pitch_values)])
+        else:
+            features['pitch_mean'] = np.array([0.0])
+            features['pitch_std'] = np.array([0.0])
+            features['pitch_range'] = np.array([0.0])
+        
+        # 3. Spectral features (voice timbre)
+        spectral_centroids = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
+        spectral_rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr)[0]
+        spectral_bandwidth = librosa.feature.spectral_bandwidth(y=y, sr=sr)[0]
+        
+        features['spectral_centroid_mean'] = np.array([np.mean(spectral_centroids)])
+        features['spectral_centroid_std'] = np.array([np.std(spectral_centroids)])
+        features['spectral_rolloff_mean'] = np.array([np.mean(spectral_rolloff)])
+        features['spectral_bandwidth_mean'] = np.array([np.mean(spectral_bandwidth)])
+        
+        # 4. Zero Crossing Rate (voice quality)
+        zcr = librosa.feature.zero_crossing_rate(y)[0]
+        features['zcr_mean'] = np.array([np.mean(zcr)])
+        features['zcr_std'] = np.array([np.std(zcr)])
+        
+        # 5. Chroma features (harmonic content)
+        chroma = librosa.feature.chroma_stft(y=y, sr=sr)
+        features['chroma_mean'] = chroma.mean(axis=1)
+        
+        # 6. Mel Spectrogram statistics
+        mel_spec = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
+        mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
+        features['mel_spec_mean'] = mel_spec_db.mean(axis=1)
+        features['mel_spec_std'] = mel_spec_db.std(axis=1)
+        
+        return features
 
     def embed_voice(self, audio_path: str) -> np.ndarray:
         try:
@@ -135,20 +193,30 @@ class VoiceModule:
             if y.size == 0:
                 raise RuntimeError("Audio has no samples after loading")
             
-            if len(y) < 1000:
-                print(f"[WARN] Audio is very short: {len(y)} samples ({len(y)/sr:.3f}s)", flush=True)
+            duration = len(y) / sr
+            if duration < 1.0:
+                print(f"[WARN] Audio is very short: {duration:.2f}s - may affect accuracy", flush=True)
+            elif duration < 0.5:
+                raise RuntimeError(f"Audio too short for speaker verification: {duration:.2f}s (need at least 0.5s)")
 
-            try:
-                mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=40)
-                print(f"[Voice] MFCC shape: {mfcc.shape}", flush=True)
-            except Exception as mfcc_error:
-                print(f"[ERROR] MFCC extraction failed: {mfcc_error}", flush=True)
-                raise RuntimeError(f"Failed to extract MFCC: {mfcc_error}")
-
-            emb = np.concatenate([mfcc.mean(axis=1), mfcc.std(axis=1)])
+            # Extract comprehensive speaker features
+            print(f"[Voice] Extracting speaker-specific features...", flush=True)
+            features = self.extract_speaker_features(y, sr)
+            
+            # Concatenate all features into a single embedding
+            embedding_parts = []
+            for key in sorted(features.keys()):
+                embedding_parts.append(features[key])
+            
+            emb = np.concatenate(embedding_parts)
+            
+            # Normalize
+            emb = emb - np.mean(emb)
             emb /= (np.linalg.norm(emb) + 1e-12)
 
-            print(f"[Voice] ✓ Embedding created: {emb.shape}", flush=True)
+            print(f"[Voice] ✓ Speaker embedding created: {emb.shape}", flush=True)
+            print(f"[Voice] Features extracted: {len(features)} types", flush=True)
+            
             return emb.astype("float32")
 
         except FileNotFoundError:
@@ -519,8 +587,24 @@ class IdentitySystem:
 
         print("\n[3/4] Verifying voice...")
         voice_emb = self.voice_mod.embed_voice(voice_path)
-        voice_score = (cosine_similarity(voice_ref, voice_emb) + 1) / 2
-        print(f"  Voice score: {voice_score:.2%}")
+        
+        # Use Euclidean distance for voice (more discriminative than cosine for speaker verification)
+        euclidean_dist = np.linalg.norm(voice_ref - voice_emb)
+        
+        # Convert distance to similarity score (0-1 range)
+        # Typical different speaker distance: 0.4-0.8
+        # Typical same speaker distance: 0.1-0.3
+        # Using exponential decay: score = e^(-k*distance)
+        voice_score = np.exp(-3.0 * euclidean_dist)
+        
+        # Also compute cosine similarity for comparison
+        cosine_sim = (cosine_similarity(voice_ref, voice_emb) + 1) / 2
+        
+        # Use weighted combination (favor distance-based metric)
+        voice_score = 0.7 * voice_score + 0.3 * cosine_sim
+        
+        print(f"  Voice score: {voice_score:.2%} (euclidean: {euclidean_dist:.3f}, cosine: {cosine_sim:.2%})")
+        print(f"  Speaker match: {'SAME' if voice_score >= 0.70 else 'DIFFERENT'}")
 
         print("\n[4/4] Verifying document...")
         img_doc = cv2.imread(doc_path)
